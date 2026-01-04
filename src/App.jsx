@@ -37,8 +37,8 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [time, setTime] = useState(new Date())
+  const [expanded, setExpanded] = useState(null)
 
-  // Fetch markets
   useEffect(() => {
     const load = async () => {
       try {
@@ -57,7 +57,6 @@ export default function App() {
     return () => clearInterval(i)
   }, [])
 
-  // Fetch book + trades
   useEffect(() => {
     const token = getToken(selected)
     if (!token) { setBook(null); setTrades([]); return }
@@ -77,7 +76,6 @@ export default function App() {
     return () => clearInterval(i)
   }, [selected])
 
-  // Whales
   const whales = useMemo(() => {
     if (!Array.isArray(trades)) return []
     return trades
@@ -88,69 +86,164 @@ export default function App() {
         price: safeNum(t.price),
         time: t.match_time
       }))
-      .filter(t => t.size >= 100)
+      .filter(t => t.size >= 50)
       .sort((a,b) => new Date(b.time) - new Date(a.time))
       .slice(0, 15)
   }, [trades])
 
-  // Signals
+  // Enhanced signals with detailed insights
   const signals = useMemo(() => {
     const s = []
+    const price = getPrice(selected)
+    const vol = safeNum(selected?.volume24hr)
+    const liq = safeNum(selected?.liquidity)
     
-    whales.slice(0, 4).forEach(w => {
-      const mins = Math.floor((Date.now() - new Date(w.time)) / 60000)
-      s.push({
-        id: 'w-' + w.id,
-        icon: '🐋',
-        level: w.size > 2000 ? 'HIGH' : 'MODERATE',
-        cls: w.size > 2000 ? 'text-orange-400 bg-orange-500/20' : 'text-yellow-400 bg-yellow-500/20',
-        title: `$${fmt(w.size)} ${w.side}`,
-        sub: `at ${(w.price*100).toFixed(0)}¢ • ${mins < 60 ? mins + 'm ago' : Math.floor(mins/60) + 'h ago'}`
+    // Whale activity signals
+    if (whales.length > 0) {
+      const recentWhales = whales.slice(0, 5)
+      const buyWhales = recentWhales.filter(w => w.side === 'BUY')
+      const sellWhales = recentWhales.filter(w => w.side === 'SELL')
+      const totalBuy = buyWhales.reduce((a, w) => a + w.size, 0)
+      const totalSell = sellWhales.reduce((a, w) => a + w.size, 0)
+      const netFlow = totalBuy - totalSell
+      
+      recentWhales.slice(0, 3).forEach(w => {
+        const mins = Math.floor((Date.now() - new Date(w.time)) / 60000)
+        const timeStr = mins < 1 ? 'just now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins/60)}h ago`
+        const priceImpact = w.size > 1000 ? 'may move price 1-3%' : 'minimal price impact'
+        
+        s.push({
+          id: 'w-' + w.id,
+          icon: '🐋',
+          level: w.size > 2000 ? 'CRITICAL' : w.size > 500 ? 'HIGH' : 'MODERATE',
+          cls: w.size > 2000 ? 'text-red-400 bg-red-500/20' : w.size > 500 ? 'text-orange-400 bg-orange-500/20' : 'text-yellow-400 bg-yellow-500/20',
+          title: `$${fmt(w.size)} ${w.side} Detected`,
+          sub: `Executed at ${(w.price*100).toFixed(1)}¢ • ${timeStr}`,
+          detail: `A ${w.side === 'BUY' ? 'buyer' : 'seller'} placed a $${w.size.toFixed(0)} order at ${(w.price*100).toFixed(1)}¢. This is ${w.size > vol * 0.01 ? 'significant relative to daily volume' : 'a moderate-sized trade'}. ${w.side === 'BUY' ? 'Bullish signal - smart money may be accumulating YES shares.' : 'Bearish signal - large holder may be exiting or shorting.'} Expected impact: ${priceImpact}.`
+        })
       })
-    })
+      
+      // Net flow signal
+      if (Math.abs(netFlow) > 200) {
+        s.push({
+          id: 'flow',
+          icon: netFlow > 0 ? '📈' : '📉',
+          level: Math.abs(netFlow) > 1000 ? 'HIGH' : 'MODERATE',
+          cls: netFlow > 0 ? 'text-green-400 bg-green-500/20' : 'text-red-400 bg-red-500/20',
+          title: `Net Flow: ${netFlow > 0 ? '+' : ''}$${fmt(netFlow)}`,
+          sub: `${buyWhales.length} buys ($${fmt(totalBuy)}) vs ${sellWhales.length} sells ($${fmt(totalSell)})`,
+          detail: `Recent whale activity shows ${netFlow > 0 ? 'net buying pressure' : 'net selling pressure'}. ${Math.abs(netFlow) > 1000 ? 'This is a strong directional signal.' : 'Moderate signal strength.'} ${netFlow > 0 ? 'Institutions may be positioning for YES outcome. Consider following the smart money if fundamentals align.' : 'Large holders are reducing exposure. This could indicate insider knowledge or profit-taking. Proceed with caution.'}`
+        })
+      }
+    }
     
+    // Order book analysis
     if (book?.bids?.length && book?.asks?.length) {
-      const bv = book.bids.slice(0,5).reduce((a,b) => a + safeNum(b.size), 0)
-      const av = book.asks.slice(0,5).reduce((a,b) => a + safeNum(a.size), 0)
-      const r = bv / (bv + av + 0.001)
+      const bidDepth = book.bids.slice(0,10).reduce((a,b) => a + safeNum(b.size), 0)
+      const askDepth = book.asks.slice(0,10).reduce((a,b) => a + safeNum(b.size), 0)
+      const totalDepth = bidDepth + askDepth
+      const ratio = totalDepth > 0 ? bidDepth / totalDepth : 0.5
+      const spread = safeNum(book.asks[0]?.price) - safeNum(book.bids[0]?.price)
+      const spreadPct = spread * 100
+      
       s.push({
         id: 'book',
         icon: '📊',
-        level: r > 0.6 || r < 0.4 ? 'HIGH' : 'INFO',
-        cls: r > 0.6 || r < 0.4 ? 'text-orange-400 bg-orange-500/20' : 'text-blue-400 bg-blue-500/20',
-        title: `Book ${r > 0.5 ? 'Bid' : 'Ask'} Heavy`,
-        sub: `${(r*100).toFixed(0)}% vs ${((1-r)*100).toFixed(0)}%`
+        level: ratio > 0.65 || ratio < 0.35 ? 'HIGH' : 'MODERATE',
+        cls: ratio > 0.55 ? 'text-green-400 bg-green-500/20' : ratio < 0.45 ? 'text-red-400 bg-red-500/20' : 'text-blue-400 bg-blue-500/20',
+        title: `Book Imbalance: ${(ratio*100).toFixed(0)}% Bids`,
+        sub: `$${fmt(bidDepth)} buying vs $${fmt(askDepth)} selling pressure`,
+        detail: `The order book shows ${ratio > 0.55 ? 'more buyers than sellers' : ratio < 0.45 ? 'more sellers than buyers' : 'balanced positioning'}. Top 10 levels: $${fmt(bidDepth)} in bids, $${fmt(askDepth)} in asks. ${ratio > 0.6 ? 'Strong buy-side support suggests price floor. Dips may be bought quickly.' : ratio < 0.4 ? 'Heavy sell-side pressure. Rallies may face resistance. Consider waiting for better entry.' : 'Neutral positioning - market is undecided. Watch for catalyst to break the stalemate.'}`
       })
+      
+      // Spread analysis
+      if (spreadPct > 1) {
+        s.push({
+          id: 'spread',
+          icon: '↔️',
+          level: spreadPct > 3 ? 'HIGH' : 'MODERATE',
+          cls: 'text-purple-400 bg-purple-500/20',
+          title: `Wide Spread: ${spreadPct.toFixed(1)}¢`,
+          sub: `Bid: ${(safeNum(book.bids[0]?.price)*100).toFixed(1)}¢ → Ask: ${(safeNum(book.asks[0]?.price)*100).toFixed(1)}¢`,
+          detail: `The bid-ask spread is ${spreadPct.toFixed(2)}¢ (${(spreadPct/price*100).toFixed(1)}% of price). ${spreadPct > 3 ? 'This is unusually wide, indicating low liquidity or high uncertainty. Market makers are demanding premium for risk. Use limit orders to avoid slippage.' : 'Moderate spread. Liquidity is acceptable but use limit orders for larger positions.'} Cost to round-trip: ~${(spreadPct*2).toFixed(1)}¢ per share.`
+        })
+      }
     }
     
-    const vol = safeNum(selected?.volume24hr)
+    // Volume analysis
     if (vol > 50000) {
+      const volToLiq = liq > 0 ? vol / liq : 0
+      const turnover = volToLiq > 5 ? 'extremely high turnover' : volToLiq > 2 ? 'high turnover' : 'normal turnover'
+      
       s.push({
         id: 'vol',
         icon: '🔥',
-        level: vol > 500000 ? 'HIGH' : 'MODERATE',
-        cls: vol > 500000 ? 'text-red-400 bg-red-500/20' : 'text-yellow-400 bg-yellow-500/20',
-        title: `Vol: $${fmt(vol)}`,
-        sub: '24h trading volume'
+        level: vol > 1000000 ? 'CRITICAL' : vol > 200000 ? 'HIGH' : 'MODERATE',
+        cls: vol > 500000 ? 'text-red-400 bg-red-500/20' : vol > 200000 ? 'text-orange-400 bg-orange-500/20' : 'text-yellow-400 bg-yellow-500/20',
+        title: `24h Volume: $${fmt(vol)}`,
+        sub: `${turnover} • ${volToLiq.toFixed(1)}x liquidity traded`,
+        detail: `This market traded $${vol.toLocaleString()} in the past 24 hours. ${vol > 500000 ? 'Exceptional activity - this is a hot market with strong conviction on both sides. High volume often precedes major price moves.' : vol > 200000 ? 'Above-average activity indicates growing interest. Catalyst may be approaching.' : 'Healthy trading activity. Market has sufficient interest for reliable price discovery.'} Volume/liquidity ratio: ${volToLiq.toFixed(1)}x (${turnover}).`
       })
     }
     
-    const liq = safeNum(selected?.liquidity)
-    if (liq > 100000) {
+    // Liquidity analysis
+    if (liq > 50000) {
+      const depthScore = liq > 1000000 ? 'institutional-grade' : liq > 500000 ? 'deep' : liq > 200000 ? 'adequate' : 'thin'
+      const slippage = liq > 500000 ? '<0.5%' : liq > 200000 ? '0.5-1%' : '1-3%'
+      
       s.push({
         id: 'liq',
         icon: '💧',
-        level: 'INFO',
+        level: liq > 500000 ? 'HIGH' : 'INFO',
         cls: 'text-cyan-400 bg-cyan-500/20',
-        title: `Liq: $${fmt(liq)}`,
-        sub: 'Available liquidity'
+        title: `Liquidity: $${fmt(liq)}`,
+        sub: `${depthScore} depth • Est. slippage: ${slippage} on $1K order`,
+        detail: `$${liq.toLocaleString()} available liquidity. Depth rating: ${depthScore}. ${liq > 500000 ? 'You can trade $5K+ with minimal slippage. Suitable for larger positions.' : liq > 200000 ? 'Adequate for positions up to $2K. Larger orders should be split.' : 'Thin liquidity - use small position sizes and limit orders. Expect 1-3% slippage on market orders.'} Recommended max position: $${fmt(liq * 0.02)} (2% of liquidity).`
       })
     }
     
-    return s
-  }, [whales, book, selected])
+    // Price level analysis
+    if (price > 0.85 || price < 0.15) {
+      const impliedProb = price * 100
+      const edge = price > 0.85 ? 100 - impliedProb : impliedProb
+      
+      s.push({
+        id: 'price',
+        icon: price > 0.85 ? '🎯' : '⚠️',
+        level: 'HIGH',
+        cls: price > 0.85 ? 'text-green-400 bg-green-500/20' : 'text-red-400 bg-red-500/20',
+        title: `${price > 0.85 ? 'High' : 'Low'} Probability: ${impliedProb.toFixed(0)}%`,
+        sub: `Market strongly expects ${price > 0.85 ? 'YES' : 'NO'} outcome`,
+        detail: `At ${impliedProb.toFixed(1)}¢, the market implies ${impliedProb.toFixed(0)}% probability of YES. ${price > 0.85 ? `Betting YES offers ${(100-impliedProb).toFixed(0)}% max return but high risk if wrong. Betting NO could yield ${(impliedProb/(1-price)).toFixed(0)}x return on upset.` : `Betting NO offers ${impliedProb.toFixed(0)}% max return. Betting YES could yield ${((1-price)/price).toFixed(0)}x return if market is wrong.`} Consider: Is there information the market is missing?`
+      })
+    }
+    
+    // Momentum signal based on recent trades
+    if (trades.length >= 5) {
+      const recent5 = trades.slice(0, 5)
+      const avgPrice = recent5.reduce((a, t) => a + safeNum(t.price), 0) / 5
+      const priceDiff = price - avgPrice
+      const momentum = priceDiff > 0.02 ? 'upward' : priceDiff < -0.02 ? 'downward' : 'neutral'
+      
+      if (Math.abs(priceDiff) > 0.01) {
+        s.push({
+          id: 'momentum',
+          icon: priceDiff > 0 ? '🚀' : '🔻',
+          level: Math.abs(priceDiff) > 0.03 ? 'HIGH' : 'MODERATE',
+          cls: priceDiff > 0 ? 'text-green-400 bg-green-500/20' : 'text-red-400 bg-red-500/20',
+          title: `${momentum.charAt(0).toUpperCase() + momentum.slice(1)} Momentum`,
+          sub: `${priceDiff > 0 ? '+' : ''}${(priceDiff*100).toFixed(1)}¢ from recent avg`,
+          detail: `Price is ${Math.abs(priceDiff*100).toFixed(1)}¢ ${priceDiff > 0 ? 'above' : 'below'} the recent trade average of ${(avgPrice*100).toFixed(1)}¢. ${Math.abs(priceDiff) > 0.03 ? 'Strong momentum - trend may continue.' : 'Moderate movement.'} ${priceDiff > 0 ? 'Buyers are in control. Consider riding the trend but watch for reversal.' : 'Sellers are pushing price down. Wait for stabilization before buying.'}`
+        })
+      }
+    }
+    
+    return s.sort((a, b) => {
+      const order = { CRITICAL: 0, HIGH: 1, MODERATE: 2, INFO: 3 }
+      return (order[a.level] ?? 4) - (order[b.level] ?? 4)
+    })
+  }, [whales, book, selected, trades])
 
-  // Score
   const score = useMemo(() => {
     let ws = 50, bs = 50
     if (whales.length) {
@@ -160,7 +253,7 @@ export default function App() {
     }
     if (book?.bids?.length && book?.asks?.length) {
       const bv = book.bids.slice(0,10).reduce((a,b) => a + safeNum(b.size), 0)
-      const av = book.asks.slice(0,10).reduce((a,b) => a + safeNum(a.size), 0)
+      const av = book.asks.slice(0,10).reduce((a,b) => a + safeNum(b.size), 0)
       if (bv + av > 0) bs = Math.round(bv / (bv + av) * 100)
     }
     return Math.round(ws * 0.5 + bs * 0.5)
@@ -190,10 +283,10 @@ export default function App() {
       <div className="h-9 px-4 flex items-center gap-3 border-b border-slate-800 overflow-x-auto">
         <span className="text-[10px] text-slate-500 shrink-0">🐋</span>
         {whales.length === 0 ? (
-          <span className="text-[10px] text-slate-600">Scanning...</span>
+          <span className="text-[10px] text-slate-600">Scanning for whale activity...</span>
         ) : whales.slice(0,8).map(w => (
           <span key={w.id} className={`text-[10px] px-2 py-0.5 rounded border whitespace-nowrap ${w.side === 'BUY' ? 'border-green-500/30 text-green-400' : 'border-red-500/30 text-red-400'}`}>
-            {w.side === 'BUY' ? '▲' : '▼'} ${fmt(w.size)}
+            {w.side === 'BUY' ? '▲' : '▼'} ${fmt(w.size)} @{(w.price*100).toFixed(0)}¢
           </span>
         ))}
       </div>
@@ -201,10 +294,10 @@ export default function App() {
       {/* Markets */}
       <div className="flex gap-2 p-2 border-b border-slate-800 overflow-x-auto">
         {loading ? (
-          <span className="text-xs text-slate-500 animate-pulse">Loading...</span>
+          <span className="text-xs text-slate-500 animate-pulse">Loading markets...</span>
         ) : markets.slice(0,8).map(m => (
           <button key={m.id} onClick={() => setSelected(m)}
-            className={`px-3 py-2 rounded border min-w-[150px] text-left ${selected?.id === m.id ? 'bg-slate-800 border-cyan-500/50' : 'bg-slate-900 border-slate-700'}`}>
+            className={`px-3 py-2 rounded border min-w-[150px] text-left transition-all ${selected?.id === m.id ? 'bg-slate-800 border-cyan-500/50' : 'bg-slate-900 border-slate-700 hover:border-slate-600'}`}>
             <div className="text-[10px] text-slate-400 truncate">{m.question?.slice(0,25)}...</div>
             <div className="flex gap-2 mt-1">
               <span className={`text-sm font-bold ${getPrice(m) > 0.5 ? 'text-green-400' : 'text-red-400'}`}>{(getPrice(m)*100).toFixed(0)}¢</span>
@@ -230,21 +323,31 @@ export default function App() {
         <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
           <div className="px-4 py-2 border-b border-slate-800 flex items-center gap-2">
             <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-            <span className="text-[11px] font-semibold">SIGNALS</span>
-            <span className="text-[9px] text-slate-600">{signals.length}</span>
+            <span className="text-[11px] font-semibold">INTELLIGENCE FEED</span>
+            <span className="text-[9px] text-slate-600 bg-slate-800 px-2 py-0.5 rounded">{signals.length} signals</span>
           </div>
-          <div className="divide-y divide-slate-800/50 max-h-72 overflow-y-auto">
+          <div className="divide-y divide-slate-800/50 max-h-[450px] overflow-y-auto">
             {signals.length === 0 ? (
-              <div className="p-4 text-xs text-slate-600">Analyzing...</div>
+              <div className="p-4 text-xs text-slate-600">Analyzing market data...</div>
             ) : signals.map(s => (
-              <div key={s.id} className="p-3 flex items-center gap-3">
-                <span className="text-lg">{s.icon}</span>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${s.cls}`}>{s.level}</span>
-                    <span className="text-[11px] text-slate-200">{s.title}</span>
+              <div key={s.id} className="p-3 hover:bg-slate-800/30 cursor-pointer transition-all" onClick={() => setExpanded(expanded === s.id ? null : s.id)}>
+                <div className="flex items-start gap-3">
+                  <span className="text-lg mt-0.5">{s.icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${s.cls}`}>{s.level}</span>
+                      <span className="text-[11px] text-slate-200 font-medium">{s.title}</span>
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">{s.sub}</div>
+                    {expanded === s.id && s.detail && (
+                      <div className="mt-2 p-3 bg-slate-800/50 rounded text-[10px] text-slate-300 leading-relaxed border-l-2 border-cyan-500/50">
+                        {s.detail}
+                      </div>
+                    )}
+                    {expanded !== s.id && (
+                      <div className="text-[9px] text-cyan-500/70 mt-1">tap for analysis →</div>
+                    )}
                   </div>
-                  <div className="text-[10px] text-slate-500">{s.sub}</div>
                 </div>
               </div>
             ))}
@@ -260,19 +363,19 @@ export default function App() {
             ) : (
               <div className="grid grid-cols-2 gap-4 text-[10px]">
                 <div>
-                  <div className="text-green-500 text-[9px] mb-1">BIDS</div>
+                  <div className="text-green-500 text-[9px] mb-1">BIDS (BUY)</div>
                   {book.bids.slice(0,8).map((b,i) => (
                     <div key={i} className="flex justify-between py-0.5">
                       <span className="text-slate-500">{fmt(b.size)}</span>
-                      <span className="text-slate-300">{(safeNum(b.price)*100).toFixed(1)}¢</span>
+                      <span className="text-green-400/80">{(safeNum(b.price)*100).toFixed(1)}¢</span>
                     </div>
                   ))}
                 </div>
                 <div>
-                  <div className="text-red-500 text-[9px] mb-1">ASKS</div>
+                  <div className="text-red-500 text-[9px] mb-1">ASKS (SELL)</div>
                   {book.asks.slice(0,8).map((a,i) => (
                     <div key={i} className="flex justify-between py-0.5">
-                      <span className="text-slate-300">{(safeNum(a.price)*100).toFixed(1)}¢</span>
+                      <span className="text-red-400/80">{(safeNum(a.price)*100).toFixed(1)}¢</span>
                       <span className="text-slate-500">{fmt(a.size)}</span>
                     </div>
                   ))}
@@ -301,12 +404,15 @@ export default function App() {
                 </div>
               </div>
             </div>
+            <div className="text-[9px] text-slate-600 text-center mt-3">
+              Based on whale flow + order book
+            </div>
           </div>
         </div>
       </div>
 
       <footer className="border-t border-slate-800 px-4 py-2 text-[9px] text-slate-600 flex justify-between">
-        <span>ELCARO OS v1.1</span>
+        <span>ELCARO OS v1.2</span>
         <span>Live Data • 5s refresh</span>
       </footer>
     </div>

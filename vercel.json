@@ -1,0 +1,20 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/gamma/:path*",
+      "destination": "https://gamma-api.polymarket.com/:path*"
+    },
+    {
+      "source": "/api/clob/:path*",
+      "destination": "https://clob.polymarket.com/:path*"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" }
+      ]
+    }
+  ]
+}

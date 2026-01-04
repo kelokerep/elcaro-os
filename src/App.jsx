@@ -1,44 +1,37 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 
 // =============================================================================
 // ELCARO OS - LIVE POLYMARKET TERMINAL
 // =============================================================================
 
-// API paths (proxied through Vite in dev, direct in production with CORS headers)
-const GAMMA_API = '/api/gamma'
-const CLOB_API = '/api/clob'
-
-// For production (Vercel/Netlify), use direct URLs with edge functions
-const getApiUrl = (type) => {
-  if (import.meta.env.PROD) {
-    return type === 'gamma' 
-      ? 'https://gamma-api.polymarket.com' 
-      : 'https://clob.polymarket.com'
-  }
-  return type === 'gamma' ? GAMMA_API : CLOB_API
-}
+// Use CORS proxy for production
+const CORS_PROXY = 'https://corsproxy.io/?'
+const GAMMA_API = `${CORS_PROXY}https://gamma-api.polymarket.com`
+const CLOB_API = `${CORS_PROXY}https://clob.polymarket.com`
 
 // =============================================================================
 // DATA FETCHING
 // =============================================================================
 
 const fetchMarkets = async () => {
-  const res = await fetch(`${getApiUrl('gamma')}/markets?active=true&closed=false&limit=12&order=volume24hr&ascending=false`)
+  const res = await fetch(`${GAMMA_API}/markets?active=true&closed=false&limit=12&order=volume24hr&ascending=false`)
   if (!res.ok) throw new Error('Failed to fetch')
   return res.json()
 }
 
 const fetchOrderBook = async (tokenId) => {
   if (!tokenId) return null
-  const res = await fetch(`${getApiUrl('clob')}/book?token_id=${tokenId}`)
-  if (!res.ok) return null
-  return res.json()
+  try {
+    const res = await fetch(`${CLOB_API}/book?token_id=${tokenId}`)
+    if (!res.ok) return null
+    return res.json()
+  } catch { return null }
 }
 
 const fetchTrades = async (tokenId) => {
   if (!tokenId) return []
   try {
-    const res = await fetch(`${getApiUrl('clob')}/trades?asset_id=${tokenId}&limit=50`)
+    const res = await fetch(`${CLOB_API}/trades?asset_id=${tokenId}&limit=50`)
     if (!res.ok) return []
     return res.json()
   } catch { return [] }

@@ -29,7 +29,47 @@ const getToken = (m) => {
   return null
 }
 
+// Extract keywords from market questions
+const extractKeywords = (markets) => {
+  const stopWords = new Set(['will', 'the', 'be', 'to', 'in', 'of', 'a', 'an', 'and', 'or', 'for', 'on', 'at', 'by', 'is', 'it', 'as', 'with', 'that', 'this', 'from', 'are', 'was', 'were', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'but', 'not', 'what', 'which', 'who', 'whom', 'when', 'where', 'why', 'how', 'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'can', 'just', 'should', 'now', 'before', 'after', 'during', 'above', 'below', 'between', 'into', 'through', 'about', 'against', 'its', 'his', 'her', 'their', 'our', 'your', 'any', 'if', 'then', 'else', 'over', 'under', 'again', 'further', 'once', 'here', 'there', 'these', 'those', 'am', 'being', 'having', 'doing', 'would', 'could', 'might', 'must', 'shall', 'may', 'need', 'dare', 'ought', 'used', 'get', 'make', 'go', 'see', 'come', 'take', 'know', 'think', 'say', 'let', 'put', 'give', 'first', 'last', 'next', 'new', 'old', 'high', 'low', 'end', 'win', 'lose', 'yes', 'no'])
+  
+  const keywordMap = {}
+  
+  markets.forEach(m => {
+    const question = m.question || ''
+    const words = question.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/)
+    const vol = safeNum(m.volume24hr)
+    const liq = safeNum(m.liquidity)
+    const price = getPrice(m)
+    const potential = Math.min(price, 1 - price) * 2 // How close to 50/50
+    const createdAt = new Date(m.createdAt || m.startDate || 0).getTime()
+    const recency = Math.max(0, 1 - (Date.now() - createdAt) / (30 * 24 * 60 * 60 * 1000)) // 0-1 based on last 30 days
+    
+    words.forEach(word => {
+      if (word.length < 3 || stopWords.has(word)) return
+      if (!keywordMap[word]) {
+        keywordMap[word] = { word, volume: 0, count: 0, potential: 0, recency: 0, markets: [] }
+      }
+      keywordMap[word].volume += vol
+      keywordMap[word].count += 1
+      keywordMap[word].potential += potential
+      keywordMap[word].recency += recency
+      keywordMap[word].markets.push(m.id)
+    })
+  })
+  
+  // Score and sort keywords
+  return Object.values(keywordMap)
+    .map(k => ({
+      ...k,
+      score: (k.volume / 1000000) * 0.4 + k.count * 0.2 + (k.potential / k.count) * 0.2 + (k.recency / k.count) * 0.2
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 30)
+}
+
 export default function App() {
+  const [allMarkets, setAllMarkets] = useState([])
   const [markets, setMarkets] = useState([])
   const [selected, setSelected] = useState(null)
   const [book, setBook] = useState(null)
@@ -40,8 +80,13 @@ export default function App() {
   const [expanded, setExpanded] = useState(new Set())
   const [paused, setPaused] = useState(false)
   const [priceHistory, setPriceHistory] = useState([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState([])
+  const [showSearch, setShowSearch] = useState(false)
+  const [searching, setSearching] = useState(false)
   
   const pauseTimeout = useRef(null)
+  const searchTimeout = useRef(null)
   
   const handleExpand = (id) => {
     setExpanded(prev => {
@@ -58,13 +103,15 @@ export default function App() {
     })
   }
 
+  // Fetch all markets for search
   useEffect(() => {
     const load = async () => {
       if (paused) return
       try {
-        const r = await fetch(`${GAMMA}/markets?active=true&closed=false&limit=15&order=volume24hr&ascending=false`)
+        const r = await fetch(`${GAMMA}/markets?active=true&closed=false&limit=100&order=volume24hr&ascending=false`)
         const d = await r.json()
-        const filtered = (d || []).filter(m => safeNum(m.volume24hr) > 5000)
+        setAllMarkets(d || [])
+        const filtered = (d || []).filter(m => safeNum(m.volume24hr) > 5000).slice(0, 15)
         setMarkets(filtered)
         if (!selected && filtered[0]) setSelected(filtered[0])
         setError(null)
@@ -76,6 +123,50 @@ export default function App() {
     const i = setInterval(load, 30000)
     return () => clearInterval(i)
   }, [paused])
+
+  // Search handler
+  const handleSearch = async (query) => {
+    setSearchQuery(query)
+    clearTimeout(searchTimeout.current)
+    
+    if (query.length < 2) {
+      setSearchResults([])
+      return
+    }
+    
+    setSearching(true)
+    searchTimeout.current = setTimeout(async () => {
+      try {
+        // Search in loaded markets first
+        const localResults = allMarkets.filter(m => 
+          m.question?.toLowerCase().includes(query.toLowerCase())
+        ).slice(0, 20)
+        
+        // Also try API search
+        const r = await fetch(`${GAMMA}/markets?active=true&closed=false&limit=20&order=volume24hr&ascending=false`)
+        const apiResults = await r.json()
+        const filtered = (apiResults || []).filter(m => 
+          m.question?.toLowerCase().includes(query.toLowerCase())
+        )
+        
+        // Merge and dedupe
+        const merged = [...localResults]
+        filtered.forEach(m => {
+          if (!merged.find(x => x.id === m.id)) merged.push(m)
+        })
+        
+        setSearchResults(merged.slice(0, 15))
+      } catch (e) {
+        setSearchResults(allMarkets.filter(m => 
+          m.question?.toLowerCase().includes(query.toLowerCase())
+        ).slice(0, 15))
+      }
+      setSearching(false)
+    }, 300)
+  }
+
+  // Keywords cloud
+  const keywords = useMemo(() => extractKeywords(allMarkets), [allMarkets])
 
   useEffect(() => {
     const token = getToken(selected)
@@ -92,13 +183,9 @@ export default function App() {
         const tradesArr = Array.isArray(t) ? t : []
         setTrades(tradesArr)
         
-        // Track price history for trend detection
         if (tradesArr.length > 0) {
           const latestPrice = safeNum(tradesArr[0]?.price)
-          setPriceHistory(prev => {
-            const updated = [...prev, { price: latestPrice, time: Date.now() }].slice(-20)
-            return updated
-          })
+          setPriceHistory(prev => [...prev, { price: latestPrice, time: Date.now() }].slice(-20))
         }
       } catch {}
     }
@@ -107,7 +194,6 @@ export default function App() {
     return () => clearInterval(i)
   }, [selected, paused])
 
-  // Only recent trades (last 15 minutes)
   const recentTrades = useMemo(() => {
     if (!Array.isArray(trades)) return []
     const fifteenMinsAgo = Date.now() - 15 * 60 * 1000
@@ -123,7 +209,6 @@ export default function App() {
       .sort((a,b) => b.time - a.time)
   }, [trades])
 
-  // CURRENT signals only - real-time market state
   const signals = useMemo(() => {
     const s = []
     const now = Date.now()
@@ -131,7 +216,6 @@ export default function App() {
     const vol = safeNum(selected?.volume24hr)
     const liq = safeNum(selected?.liquidity)
     
-    // === REAL-TIME ORDER BOOK SIGNALS ===
     if (book?.bids?.length && book?.asks?.length) {
       const bestBid = safeNum(book.bids[0]?.price)
       const bestAsk = safeNum(book.asks[0]?.price)
@@ -139,17 +223,14 @@ export default function App() {
       const spreadPct = spread * 100
       const mid = (bestBid + bestAsk) / 2
       
-      // Top 5 levels depth
       const bidDepth5 = book.bids.slice(0,5).reduce((a,b) => a + safeNum(b.size), 0)
       const askDepth5 = book.asks.slice(0,5).reduce((a,b) => a + safeNum(b.size), 0)
       const totalDepth5 = bidDepth5 + askDepth5
       const imbalance5 = totalDepth5 > 0 ? (bidDepth5 - askDepth5) / totalDepth5 : 0
       
-      // Full book depth
       const bidDepthFull = book.bids.reduce((a,b) => a + safeNum(b.size), 0)
       const askDepthFull = book.asks.reduce((a,b) => a + safeNum(b.size), 0)
       
-      // 1. ORDER BOOK PRESSURE (most important real-time signal)
       const pressureDirection = imbalance5 > 0.15 ? 'BUY' : imbalance5 < -0.15 ? 'SELL' : 'NEUTRAL'
       const pressureStrength = Math.abs(imbalance5)
       
@@ -160,26 +241,23 @@ export default function App() {
           level: pressureStrength > 0.3 ? 'CRITICAL' : pressureStrength > 0.2 ? 'HIGH' : 'MODERATE',
           cls: imbalance5 > 0 ? 'text-green-400 bg-green-500/20' : 'text-red-400 bg-red-500/20',
           title: `${pressureDirection} Pressure: ${(pressureStrength * 100).toFixed(0)}%`,
-          sub: `NOW • $${fmt(bidDepth5)} bids vs $${fmt(askDepth5)} asks at top 5 levels`,
-          detail: `Real-time order book shows ${imbalance5 > 0 ? 'buyers outweighing sellers' : 'sellers outweighing buyers'} by ${(pressureStrength * 100).toFixed(0)}%. Bid depth: $${fmt(bidDepthFull)} total. Ask depth: $${fmt(askDepthFull)} total. ${imbalance5 > 0.2 ? 'Strong buy wall forming - price likely to push up.' : imbalance5 < -0.2 ? 'Heavy sell pressure - expect downward movement.' : 'Moderate imbalance - watch for changes.'} Best bid: ${(bestBid*100).toFixed(1)}¢, Best ask: ${(bestAsk*100).toFixed(1)}¢.`
+          sub: `NOW • $${fmt(bidDepth5)} bids vs $${fmt(askDepth5)} asks`,
+          detail: `Real-time order book shows ${imbalance5 > 0 ? 'buyers outweighing sellers' : 'sellers outweighing buyers'} by ${(pressureStrength * 100).toFixed(0)}%. Bid depth: $${fmt(bidDepthFull)} total. Ask depth: $${fmt(askDepthFull)} total. ${imbalance5 > 0.2 ? 'Strong buy wall - price likely to push up.' : imbalance5 < -0.2 ? 'Heavy sell pressure - expect downward movement.' : 'Moderate imbalance.'}`
         })
       }
       
-      // 2. SPREAD SIGNAL (liquidity indicator)
       if (spreadPct > 0.5) {
-        const spreadRating = spreadPct > 3 ? 'WIDE' : spreadPct > 1.5 ? 'MODERATE' : 'TIGHT'
         s.push({
           id: 'spread',
           icon: '↔️',
           level: spreadPct > 3 ? 'HIGH' : 'MODERATE',
           cls: spreadPct > 3 ? 'text-orange-400 bg-orange-500/20' : 'text-purple-400 bg-purple-500/20',
-          title: `Spread: ${spreadPct.toFixed(2)}¢ (${spreadRating})`,
+          title: `Spread: ${spreadPct.toFixed(2)}¢`,
           sub: `NOW • Bid ${(bestBid*100).toFixed(1)}¢ → Ask ${(bestAsk*100).toFixed(1)}¢`,
-          detail: `Current spread is ${spreadPct.toFixed(2)}¢ (${(spread/mid*100).toFixed(1)}% of mid price). ${spreadPct > 3 ? 'Wide spread indicates uncertainty or low liquidity. Use limit orders only - market orders will suffer significant slippage.' : spreadPct > 1.5 ? 'Moderate spread. Limit orders recommended for positions over $500.' : 'Tight spread. Good liquidity for trading.'} Round-trip cost: ~${(spreadPct*2).toFixed(1)}¢ per share.`
+          detail: `Current spread is ${spreadPct.toFixed(2)}¢. ${spreadPct > 3 ? 'Wide spread - use limit orders only.' : 'Moderate spread.'} Round-trip cost: ~${(spreadPct*2).toFixed(1)}¢ per share.`
         })
       }
       
-      // 3. WALL DETECTION
       const bidWall = book.bids.find(b => safeNum(b.size) > bidDepthFull * 0.3)
       const askWall = book.asks.find(a => safeNum(a.size) > askDepthFull * 0.3)
       
@@ -190,8 +268,8 @@ export default function App() {
           level: 'HIGH',
           cls: 'text-green-400 bg-green-500/20',
           title: `Buy Wall: $${fmt(bidWall.size)} at ${(safeNum(bidWall.price)*100).toFixed(1)}¢`,
-          sub: `NOW • Large bid creating price floor`,
-          detail: `A $${fmt(bidWall.size)} buy order sits at ${(safeNum(bidWall.price)*100).toFixed(1)}¢, representing ${((safeNum(bidWall.size)/bidDepthFull)*100).toFixed(0)}% of total bid depth. This creates strong support - price unlikely to fall below this level without significant selling pressure. Consider this your downside protection level.`
+          sub: `NOW • Strong support level`,
+          detail: `A $${fmt(bidWall.size)} buy order at ${(safeNum(bidWall.price)*100).toFixed(1)}¢ creates strong support. Price unlikely to fall below without significant selling.`
         })
       }
       
@@ -202,13 +280,12 @@ export default function App() {
           level: 'HIGH',
           cls: 'text-red-400 bg-red-500/20',
           title: `Sell Wall: $${fmt(askWall.size)} at ${(safeNum(askWall.price)*100).toFixed(1)}¢`,
-          sub: `NOW • Large ask creating resistance`,
-          detail: `A $${fmt(askWall.size)} sell order sits at ${(safeNum(askWall.price)*100).toFixed(1)}¢, representing ${((safeNum(askWall.size)/askDepthFull)*100).toFixed(0)}% of total ask depth. This creates resistance - price needs significant buying to break through. Watch for this wall to be pulled (removed) as a bullish signal.`
+          sub: `NOW • Resistance level`,
+          detail: `A $${fmt(askWall.size)} sell order at ${(safeNum(askWall.price)*100).toFixed(1)}¢ creates resistance. Watch for wall removal as bullish signal.`
         })
       }
     }
     
-    // === RECENT TRADE FLOW (last 15 mins only) ===
     if (recentTrades.length > 0) {
       const buyTrades = recentTrades.filter(t => t.side === 'BUY')
       const sellTrades = recentTrades.filter(t => t.side === 'SELL')
@@ -218,19 +295,17 @@ export default function App() {
       const totalFlow = buyVol + sellVol
       
       if (totalFlow > 100) {
-        const flowPct = totalFlow > 0 ? Math.abs(netFlow) / totalFlow : 0
         s.push({
           id: 'flow-15m',
           icon: netFlow > 0 ? '📈' : netFlow < 0 ? '📉' : '➡️',
           level: Math.abs(netFlow) > 1000 ? 'HIGH' : 'MODERATE',
           cls: netFlow > 0 ? 'text-green-400 bg-green-500/20' : netFlow < 0 ? 'text-red-400 bg-red-500/20' : 'text-slate-400 bg-slate-500/20',
           title: `15min Flow: ${netFlow > 0 ? '+' : ''}$${fmt(netFlow)}`,
-          sub: `RECENT • ${buyTrades.length} buys ($${fmt(buyVol)}) vs ${sellTrades.length} sells ($${fmt(sellVol)})`,
-          detail: `In the last 15 minutes: ${recentTrades.length} trades totaling $${fmt(totalFlow)}. Net ${netFlow > 0 ? 'buying' : netFlow < 0 ? 'selling' : 'neutral'} pressure of $${fmt(Math.abs(netFlow))} (${(flowPct*100).toFixed(0)}% imbalance). ${Math.abs(netFlow) > 500 ? 'Strong directional conviction.' : 'Mixed sentiment.'} ${netFlow > 0 ? 'Buyers are aggressive - momentum favors upside.' : netFlow < 0 ? 'Sellers in control - wait for stabilization.' : 'Balanced flow - no clear direction.'}`
+          sub: `RECENT • ${buyTrades.length} buys vs ${sellTrades.length} sells`,
+          detail: `Last 15 min: ${recentTrades.length} trades, $${fmt(totalFlow)} volume. ${netFlow > 0 ? 'Buyers aggressive.' : netFlow < 0 ? 'Sellers in control.' : 'Balanced.'}`
         })
       }
       
-      // Large recent trades (whales in last 15 mins)
       const whales = recentTrades.filter(t => t.size >= 500).slice(0, 3)
       whales.forEach((w, idx) => {
         const minsAgo = Math.floor((now - w.time) / 60000)
@@ -240,13 +315,12 @@ export default function App() {
           level: w.size > 2000 ? 'CRITICAL' : 'HIGH',
           cls: w.side === 'BUY' ? 'text-green-400 bg-green-500/20' : 'text-red-400 bg-red-500/20',
           title: `$${fmt(w.size)} ${w.side}`,
-          sub: `${minsAgo}min ago • at ${(w.price*100).toFixed(1)}¢`,
-          detail: `A whale ${w.side === 'BUY' ? 'bought' : 'sold'} $${w.size.toFixed(0)} worth just ${minsAgo} minutes ago at ${(w.price*100).toFixed(1)}¢. ${w.side === 'BUY' ? 'Smart money accumulating - bullish signal.' : 'Large position exiting - could signal insider knowledge or profit-taking.'} This represents ${((w.size/vol)*100).toFixed(2)}% of daily volume in a single trade.`
+          sub: `${minsAgo}m ago • at ${(w.price*100).toFixed(1)}¢`,
+          detail: `Whale ${w.side === 'BUY' ? 'bought' : 'sold'} $${w.size.toFixed(0)} at ${(w.price*100).toFixed(1)}¢. ${w.side === 'BUY' ? 'Bullish signal.' : 'Bearish signal.'}`
         })
       })
     }
     
-    // === PRICE MOMENTUM (from our tracked history) ===
     if (priceHistory.length >= 3) {
       const latest = priceHistory[priceHistory.length - 1]?.price || price
       const oldest = priceHistory[0]?.price || price
@@ -260,64 +334,47 @@ export default function App() {
           level: Math.abs(changePct) > 2 ? 'HIGH' : 'MODERATE',
           cls: change > 0 ? 'text-green-400 bg-green-500/20' : 'text-red-400 bg-red-500/20',
           title: `${change > 0 ? 'Rising' : 'Falling'}: ${change > 0 ? '+' : ''}${changePct.toFixed(1)}%`,
-          sub: `TREND • ${(oldest*100).toFixed(1)}¢ → ${(latest*100).toFixed(1)}¢ recently`,
-          detail: `Price moved ${Math.abs(changePct).toFixed(1)}% ${change > 0 ? 'up' : 'down'} in recent trades. ${Math.abs(changePct) > 2 ? 'Strong momentum - trend likely to continue.' : 'Moderate movement.'} ${change > 0 ? 'Consider buying on pullbacks rather than chasing.' : 'Wait for support to form before entering.'}`
+          sub: `TREND • ${(oldest*100).toFixed(1)}¢ → ${(latest*100).toFixed(1)}¢`,
+          detail: `Price moved ${Math.abs(changePct).toFixed(1)}% ${change > 0 ? 'up' : 'down'} recently. ${change > 0 ? 'Buyers in control.' : 'Sellers pushing down.'}`
         })
       }
     }
     
-    // === MARKET CONTEXT SIGNALS ===
-    // Liquidity warning
     if (liq < 100000 && liq > 0) {
       s.push({
-        id: 'low-liq',
-        icon: '⚠️',
-        level: 'HIGH',
-        cls: 'text-yellow-400 bg-yellow-500/20',
-        title: `Low Liquidity: $${fmt(liq)}`,
-        sub: `CAUTION • Thin market, high slippage risk`,
-        detail: `This market has only $${fmt(liq)} in liquidity. Expected slippage on $500 order: 2-5%. Use small position sizes and limit orders only. Large orders will move the price significantly.`
+        id: 'low-liq', icon: '⚠️', level: 'HIGH', cls: 'text-yellow-400 bg-yellow-500/20',
+        title: `Low Liquidity: $${fmt(liq)}`, sub: `CAUTION • High slippage risk`,
+        detail: `Only $${fmt(liq)} liquidity. Use small positions and limit orders.`
       })
     } else if (liq >= 500000) {
       s.push({
-        id: 'high-liq',
-        icon: '💧',
-        level: 'INFO',
-        cls: 'text-cyan-400 bg-cyan-500/20',
-        title: `Deep Liquidity: $${fmt(liq)}`,
-        sub: `GOOD • Institutional-grade depth`,
-        detail: `$${fmt(liq)} available liquidity. You can trade positions up to $${fmt(liq * 0.05)} with minimal slippage (<0.5%). This is a well-traded market suitable for larger positions.`
+        id: 'high-liq', icon: '💧', level: 'INFO', cls: 'text-cyan-400 bg-cyan-500/20',
+        title: `Deep Liquidity: $${fmt(liq)}`, sub: `GOOD • Institutional depth`,
+        detail: `$${fmt(liq)} available. Trade up to $${fmt(liq * 0.05)} with minimal slippage.`
       })
     }
     
-    // Extreme price signal
     if (price > 0.9 || price < 0.1) {
       s.push({
-        id: 'extreme',
-        icon: price > 0.9 ? '🎯' : '💀',
-        level: 'HIGH',
+        id: 'extreme', icon: price > 0.9 ? '🎯' : '💀', level: 'HIGH',
         cls: price > 0.9 ? 'text-green-400 bg-green-500/20' : 'text-red-400 bg-red-500/20',
         title: `${price > 0.9 ? 'Near Certain' : 'Near Zero'}: ${(price*100).toFixed(0)}%`,
-        sub: `PROBABILITY • Market consensus is strong`,
-        detail: `At ${(price*100).toFixed(1)}¢, market implies ${(price*100).toFixed(0)}% chance of YES. ${price > 0.9 ? `Low upside (${((1-price)*100).toFixed(0)}% max gain on YES), but NO bet pays ${(price/(1-price)).toFixed(1)}x if wrong.` : `YES bet pays ${((1-price)/price).toFixed(1)}x if market is wrong. High risk, high reward contrarian play.`} Ask yourself: What does the market not know?`
+        sub: `PROBABILITY • Strong consensus`,
+        detail: `At ${(price*100).toFixed(1)}¢, market implies ${(price*100).toFixed(0)}% YES. ${price > 0.9 ? `NO pays ${(price/(1-price)).toFixed(1)}x on upset.` : `YES pays ${((1-price)/price).toFixed(1)}x if wrong.`}`
       })
     }
     
-    // Sort by importance
     const levelOrder = { CRITICAL: 0, HIGH: 1, MODERATE: 2, INFO: 3 }
     return s.sort((a, b) => (levelOrder[a.level] ?? 4) - (levelOrder[b.level] ?? 4))
   }, [book, recentTrades, selected, priceHistory])
 
   const score = useMemo(() => {
     let ws = 50, bs = 50
-    
-    // Score from recent trades (not all trades)
     if (recentTrades.length > 0) {
       const buy = recentTrades.filter(w => w.side === 'BUY').reduce((a,w) => a + w.size, 0)
       const sell = recentTrades.filter(w => w.side === 'SELL').reduce((a,w) => a + w.size, 0)
       if (buy + sell > 0) ws = Math.round(buy / (buy + sell) * 100)
     }
-    
     if (book?.bids?.length && book?.asks?.length) {
       const bv = book.bids.slice(0,10).reduce((a,b) => a + safeNum(b.size), 0)
       const av = book.asks.slice(0,10).reduce((a,b) => a + safeNum(b.size), 0)
@@ -340,23 +397,104 @@ export default function App() {
             <div className="text-[9px] text-slate-500">LIVE POLYMARKET</div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${error ? 'bg-red-500' : paused ? 'bg-yellow-500' : 'bg-green-500'} animate-pulse`} />
-          <span className={`text-[10px] ${error ? 'text-red-400' : paused ? 'text-yellow-400' : 'text-green-400'}`}>
-            {error ? 'ERROR' : paused ? 'PAUSED' : 'LIVE'}
-          </span>
-          <span className="text-[9px] text-slate-500 ml-1">{time.toLocaleTimeString()}</span>
+        <div className="flex items-center gap-3">
+          <button onClick={() => setShowSearch(!showSearch)} className="text-slate-400 hover:text-white transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+          </button>
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${error ? 'bg-red-500' : paused ? 'bg-yellow-500' : 'bg-green-500'} animate-pulse`} />
+            <span className={`text-[10px] ${error ? 'text-red-400' : paused ? 'text-yellow-400' : 'text-green-400'}`}>
+              {error ? 'ERROR' : paused ? 'PAUSED' : 'LIVE'}
+            </span>
+          </div>
         </div>
       </div>
 
+      {/* Search Panel */}
+      {showSearch && (
+        <div className="border-b border-slate-800 bg-slate-900/80">
+          <div className="p-4">
+            <div className="relative">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => handleSearch(e.target.value)}
+                placeholder="Search markets... (e.g. Trump, Bitcoin, NBA)"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                autoFocus
+              />
+              {searching && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                  <div className="w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
+            </div>
+            
+            {/* Keywords Cloud */}
+            <div className="mt-3">
+              <div className="text-[9px] text-slate-500 mb-2">TRENDING KEYWORDS</div>
+              <div className="flex flex-wrap gap-1.5">
+                {keywords.slice(0, 20).map((k, i) => {
+                  const size = k.score > 2 ? 'text-sm' : k.score > 1 ? 'text-xs' : 'text-[10px]'
+                  const opacity = k.score > 2 ? 'opacity-100' : k.score > 1 ? 'opacity-80' : 'opacity-60'
+                  const color = k.volume > 5000000 ? 'text-cyan-400 border-cyan-500/30' 
+                              : k.potential / k.count > 0.8 ? 'text-amber-400 border-amber-500/30'
+                              : k.recency / k.count > 0.5 ? 'text-green-400 border-green-500/30'
+                              : 'text-slate-400 border-slate-600/30'
+                  return (
+                    <button
+                      key={k.word}
+                      onClick={() => { handleSearch(k.word); setSearchQuery(k.word) }}
+                      className={`px-2 py-0.5 rounded border ${size} ${opacity} ${color} hover:opacity-100 hover:bg-slate-800 transition-all`}
+                    >
+                      {k.word}
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="flex gap-4 mt-2 text-[9px] text-slate-600">
+                <span><span className="text-cyan-400">●</span> High Volume</span>
+                <span><span className="text-amber-400">●</span> High Potential</span>
+                <span><span className="text-green-400">●</span> Recent</span>
+              </div>
+            </div>
+            
+            {/* Search Results */}
+            {searchResults.length > 0 && (
+              <div className="mt-3 border-t border-slate-800 pt-3">
+                <div className="text-[9px] text-slate-500 mb-2">RESULTS ({searchResults.length})</div>
+                <div className="space-y-1 max-h-60 overflow-y-auto">
+                  {searchResults.map(m => {
+                    const p = getPrice(m)
+                    return (
+                      <button
+                        key={m.id}
+                        onClick={() => { setSelected(m); setShowSearch(false); setSearchQuery(''); setSearchResults([]) }}
+                        className="w-full text-left p-2 rounded bg-slate-800/50 hover:bg-slate-800 transition-colors flex items-center justify-between"
+                      >
+                        <span className="text-[11px] text-slate-300 truncate flex-1 mr-3">{m.question}</span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className={`text-sm font-bold ${p > 0.5 ? 'text-green-400' : 'text-red-400'}`}>{(p*100).toFixed(0)}¢</span>
+                          <span className="text-[9px] text-slate-600">${fmt(m.volume24hr)}</span>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {paused && (
         <div className="bg-yellow-500/10 border-b border-yellow-500/30 px-4 py-1.5 flex items-center justify-between">
-          <span className="text-[10px] text-yellow-400">⏸ Auto-refresh paused while reading</span>
+          <span className="text-[10px] text-yellow-400">⏸ Paused while reading</span>
           <button onClick={() => { setPaused(false); setExpanded(new Set()) }} className="text-[10px] text-yellow-400 hover:text-yellow-300 underline">Resume</button>
         </div>
       )}
 
-      {/* Whale Ticker - only recent */}
+      {/* Whale Ticker */}
       <div className="h-9 px-4 flex items-center gap-3 border-b border-slate-800 overflow-x-auto">
         <span className="text-[10px] text-slate-500 shrink-0">🐋 LIVE</span>
         {recentTrades.filter(t => t.size >= 200).length === 0 ? (
@@ -374,7 +512,7 @@ export default function App() {
       {/* Markets */}
       <div className="flex gap-2 p-2 border-b border-slate-800 overflow-x-auto">
         {loading ? (
-          <span className="text-xs text-slate-500 animate-pulse">Loading markets...</span>
+          <span className="text-xs text-slate-500 animate-pulse">Loading...</span>
         ) : markets.slice(0,8).map(m => (
           <button key={m.id} onClick={() => { setSelected(m); setExpanded(new Set()); setPaused(false); setPriceHistory([]) }}
             className={`px-3 py-2 rounded border min-w-[150px] text-left transition-all ${selected?.id === m.id ? 'bg-slate-800 border-cyan-500/50' : 'bg-slate-900 border-slate-700 hover:border-slate-600'}`}>
@@ -404,15 +542,14 @@ export default function App() {
           <div className="px-4 py-2 border-b border-slate-800 flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${paused ? 'bg-yellow-500' : 'bg-green-500'} animate-pulse`} />
             <span className="text-[11px] font-semibold">LIVE SIGNALS</span>
-            <span className="text-[9px] text-slate-600 bg-slate-800 px-2 py-0.5 rounded">{signals.length} active</span>
-            <span className="text-[9px] text-slate-600 ml-1">• Real-time only</span>
+            <span className="text-[9px] text-slate-600 bg-slate-800 px-2 py-0.5 rounded">{signals.length}</span>
             {hasExpanded && (
               <button onClick={() => { setExpanded(new Set()); setPaused(false) }} className="ml-auto text-[9px] text-slate-500 hover:text-slate-300">Collapse all</button>
             )}
           </div>
-          <div className="divide-y divide-slate-800/50 max-h-[450px] overflow-y-auto">
+          <div className="divide-y divide-slate-800/50 max-h-[400px] overflow-y-auto">
             {signals.length === 0 ? (
-              <div className="p-4 text-xs text-slate-600">Analyzing current market state...</div>
+              <div className="p-4 text-xs text-slate-600">Analyzing...</div>
             ) : signals.map(s => (
               <div key={s.id} className={`p-3 cursor-pointer transition-all ${expanded.has(s.id) ? 'bg-slate-800/50' : 'hover:bg-slate-800/30'}`} onClick={() => handleExpand(s.id)}>
                 <div className="flex items-start gap-3">
@@ -424,13 +561,9 @@ export default function App() {
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">{s.sub}</div>
                     {expanded.has(s.id) && s.detail && (
-                      <div className="mt-2 p-3 bg-slate-800/70 rounded text-[10px] text-slate-300 leading-relaxed border-l-2 border-cyan-500/50">
-                        {s.detail}
-                      </div>
+                      <div className="mt-2 p-3 bg-slate-800/70 rounded text-[10px] text-slate-300 leading-relaxed border-l-2 border-cyan-500/50">{s.detail}</div>
                     )}
-                    {!expanded.has(s.id) && (
-                      <div className="text-[9px] text-cyan-500/70 mt-1">tap for analysis →</div>
-                    )}
+                    {!expanded.has(s.id) && <div className="text-[9px] text-cyan-500/70 mt-1">tap for analysis →</div>}
                   </div>
                 </div>
               </div>
@@ -447,7 +580,7 @@ export default function App() {
             ) : (
               <div className="grid grid-cols-2 gap-4 text-[10px]">
                 <div>
-                  <div className="text-green-500 text-[9px] mb-1">BIDS (BUY)</div>
+                  <div className="text-green-500 text-[9px] mb-1">BIDS</div>
                   {book.bids.slice(0,8).map((b,i) => (
                     <div key={i} className="flex justify-between py-0.5">
                       <span className="text-slate-500">{fmt(b.size)}</span>
@@ -456,7 +589,7 @@ export default function App() {
                   ))}
                 </div>
                 <div>
-                  <div className="text-red-500 text-[9px] mb-1">ASKS (SELL)</div>
+                  <div className="text-red-500 text-[9px] mb-1">ASKS</div>
                   {book.asks.slice(0,8).map((a,i) => (
                     <div key={i} className="flex justify-between py-0.5">
                       <span className="text-red-400/80">{(safeNum(a.price)*100).toFixed(1)}¢</span>
@@ -488,16 +621,13 @@ export default function App() {
                 </div>
               </div>
             </div>
-            <div className="text-[9px] text-slate-600 text-center mt-3">
-              Based on 15min flow + order book
-            </div>
           </div>
         </div>
       </div>
 
       <footer className="border-t border-slate-800 px-4 py-2 text-[9px] text-slate-600 flex justify-between">
-        <span>ELCARO OS v1.4</span>
-        <span>{paused ? '⏸ Paused' : 'Live'} • Real-time signals</span>
+        <span>ELCARO OS v1.5</span>
+        <span>{paused ? '⏸' : '●'} {allMarkets.length} markets indexed</span>
       </footer>
     </div>
   )

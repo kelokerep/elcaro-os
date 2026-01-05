@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 
 const PROXY = 'https://corsproxy.io/?'
 const GAMMA = `${PROXY}https://gamma-api.polymarket.com`
@@ -37,10 +37,31 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [time, setTime] = useState(new Date())
-  const [expanded, setExpanded] = useState(null)
+  const [expanded, setExpanded] = useState(new Set())
+  const [paused, setPaused] = useState(false)
+  
+  // Pause refresh when reading
+  const pauseTimeout = useRef(null)
+  
+  const handleExpand = (id) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+        // Pause refreshes for 30 seconds when expanding
+        setPaused(true)
+        clearTimeout(pauseTimeout.current)
+        pauseTimeout.current = setTimeout(() => setPaused(false), 30000)
+      }
+      return next
+    })
+  }
 
   useEffect(() => {
     const load = async () => {
+      if (paused) return // Skip refresh if user is reading
       try {
         const r = await fetch(`${GAMMA}/markets?active=true&closed=false&limit=15&order=volume24hr&ascending=false`)
         const d = await r.json()
@@ -55,13 +76,14 @@ export default function App() {
     load()
     const i = setInterval(load, 30000)
     return () => clearInterval(i)
-  }, [])
+  }, [paused])
 
   useEffect(() => {
     const token = getToken(selected)
     if (!token) { setBook(null); setTrades([]); return }
     
     const load = async () => {
+      if (paused) return // Skip refresh if user is reading
       try {
         const [b, t] = await Promise.all([
           fetch(`${CLOB}/book?token_id=${token}`).then(r => r.ok ? r.json() : null).catch(() => null),
@@ -74,7 +96,7 @@ export default function App() {
     load()
     const i = setInterval(load, 5000)
     return () => clearInterval(i)
-  }, [selected])
+  }, [selected, paused])
 
   const whales = useMemo(() => {
     if (!Array.isArray(trades)) return []
@@ -91,14 +113,14 @@ export default function App() {
       .slice(0, 15)
   }, [trades])
 
-  // Enhanced signals with detailed insights
+  // Enhanced signals with stable IDs
   const signals = useMemo(() => {
     const s = []
     const price = getPrice(selected)
     const vol = safeNum(selected?.volume24hr)
     const liq = safeNum(selected?.liquidity)
     
-    // Whale activity signals
+    // Whale activity signals - use index for stable ID
     if (whales.length > 0) {
       const recentWhales = whales.slice(0, 5)
       const buyWhales = recentWhales.filter(w => w.side === 'BUY')
@@ -107,13 +129,13 @@ export default function App() {
       const totalSell = sellWhales.reduce((a, w) => a + w.size, 0)
       const netFlow = totalBuy - totalSell
       
-      recentWhales.slice(0, 3).forEach(w => {
+      recentWhales.slice(0, 3).forEach((w, idx) => {
         const mins = Math.floor((Date.now() - new Date(w.time)) / 60000)
         const timeStr = mins < 1 ? 'just now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins/60)}h ago`
         const priceImpact = w.size > 1000 ? 'may move price 1-3%' : 'minimal price impact'
         
         s.push({
-          id: 'w-' + w.id,
+          id: `whale-${idx}`, // Stable index-based ID
           icon: '🐋',
           level: w.size > 2000 ? 'CRITICAL' : w.size > 500 ? 'HIGH' : 'MODERATE',
           cls: w.size > 2000 ? 'text-red-400 bg-red-500/20' : w.size > 500 ? 'text-orange-400 bg-orange-500/20' : 'text-yellow-400 bg-yellow-500/20',
@@ -123,7 +145,6 @@ export default function App() {
         })
       })
       
-      // Net flow signal
       if (Math.abs(netFlow) > 200) {
         s.push({
           id: 'flow',
@@ -137,7 +158,6 @@ export default function App() {
       }
     }
     
-    // Order book analysis
     if (book?.bids?.length && book?.asks?.length) {
       const bidDepth = book.bids.slice(0,10).reduce((a,b) => a + safeNum(b.size), 0)
       const askDepth = book.asks.slice(0,10).reduce((a,b) => a + safeNum(b.size), 0)
@@ -156,7 +176,6 @@ export default function App() {
         detail: `The order book shows ${ratio > 0.55 ? 'more buyers than sellers' : ratio < 0.45 ? 'more sellers than buyers' : 'balanced positioning'}. Top 10 levels: $${fmt(bidDepth)} in bids, $${fmt(askDepth)} in asks. ${ratio > 0.6 ? 'Strong buy-side support suggests price floor. Dips may be bought quickly.' : ratio < 0.4 ? 'Heavy sell-side pressure. Rallies may face resistance. Consider waiting for better entry.' : 'Neutral positioning - market is undecided. Watch for catalyst to break the stalemate.'}`
       })
       
-      // Spread analysis
       if (spreadPct > 1) {
         s.push({
           id: 'spread',
@@ -170,7 +189,6 @@ export default function App() {
       }
     }
     
-    // Volume analysis
     if (vol > 50000) {
       const volToLiq = liq > 0 ? vol / liq : 0
       const turnover = volToLiq > 5 ? 'extremely high turnover' : volToLiq > 2 ? 'high turnover' : 'normal turnover'
@@ -186,7 +204,6 @@ export default function App() {
       })
     }
     
-    // Liquidity analysis
     if (liq > 50000) {
       const depthScore = liq > 1000000 ? 'institutional-grade' : liq > 500000 ? 'deep' : liq > 200000 ? 'adequate' : 'thin'
       const slippage = liq > 500000 ? '<0.5%' : liq > 200000 ? '0.5-1%' : '1-3%'
@@ -202,10 +219,8 @@ export default function App() {
       })
     }
     
-    // Price level analysis
     if (price > 0.85 || price < 0.15) {
       const impliedProb = price * 100
-      const edge = price > 0.85 ? 100 - impliedProb : impliedProb
       
       s.push({
         id: 'price',
@@ -218,7 +233,6 @@ export default function App() {
       })
     }
     
-    // Momentum signal based on recent trades
     if (trades.length >= 5) {
       const recent5 = trades.slice(0, 5)
       const avgPrice = recent5.reduce((a, t) => a + safeNum(t.price), 0) / 5
@@ -260,6 +274,7 @@ export default function App() {
   }, [whales, book])
 
   const price = getPrice(selected)
+  const hasExpanded = expanded.size > 0
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-mono">
@@ -273,19 +288,34 @@ export default function App() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${error ? 'bg-red-500' : 'bg-green-500'} animate-pulse`} />
-          <span className={`text-[10px] ${error ? 'text-red-400' : 'text-green-400'}`}>{error ? 'ERROR' : 'LIVE'}</span>
+          <div className={`w-2 h-2 rounded-full ${error ? 'bg-red-500' : paused ? 'bg-yellow-500' : 'bg-green-500'} animate-pulse`} />
+          <span className={`text-[10px] ${error ? 'text-red-400' : paused ? 'text-yellow-400' : 'text-green-400'}`}>
+            {error ? 'ERROR' : paused ? 'PAUSED' : 'LIVE'}
+          </span>
           <span className="text-[9px] text-slate-500 ml-1">{time.toLocaleTimeString()}</span>
         </div>
       </div>
+
+      {/* Pause indicator */}
+      {paused && (
+        <div className="bg-yellow-500/10 border-b border-yellow-500/30 px-4 py-1.5 flex items-center justify-between">
+          <span className="text-[10px] text-yellow-400">⏸ Auto-refresh paused while reading</span>
+          <button 
+            onClick={() => { setPaused(false); setExpanded(new Set()) }}
+            className="text-[10px] text-yellow-400 hover:text-yellow-300 underline"
+          >
+            Resume
+          </button>
+        </div>
+      )}
 
       {/* Whale Ticker */}
       <div className="h-9 px-4 flex items-center gap-3 border-b border-slate-800 overflow-x-auto">
         <span className="text-[10px] text-slate-500 shrink-0">🐋</span>
         {whales.length === 0 ? (
           <span className="text-[10px] text-slate-600">Scanning for whale activity...</span>
-        ) : whales.slice(0,8).map(w => (
-          <span key={w.id} className={`text-[10px] px-2 py-0.5 rounded border whitespace-nowrap ${w.side === 'BUY' ? 'border-green-500/30 text-green-400' : 'border-red-500/30 text-red-400'}`}>
+        ) : whales.slice(0,8).map((w, i) => (
+          <span key={i} className={`text-[10px] px-2 py-0.5 rounded border whitespace-nowrap ${w.side === 'BUY' ? 'border-green-500/30 text-green-400' : 'border-red-500/30 text-red-400'}`}>
             {w.side === 'BUY' ? '▲' : '▼'} ${fmt(w.size)} @{(w.price*100).toFixed(0)}¢
           </span>
         ))}
@@ -296,7 +326,7 @@ export default function App() {
         {loading ? (
           <span className="text-xs text-slate-500 animate-pulse">Loading markets...</span>
         ) : markets.slice(0,8).map(m => (
-          <button key={m.id} onClick={() => setSelected(m)}
+          <button key={m.id} onClick={() => { setSelected(m); setExpanded(new Set()); setPaused(false) }}
             className={`px-3 py-2 rounded border min-w-[150px] text-left transition-all ${selected?.id === m.id ? 'bg-slate-800 border-cyan-500/50' : 'bg-slate-900 border-slate-700 hover:border-slate-600'}`}>
             <div className="text-[10px] text-slate-400 truncate">{m.question?.slice(0,25)}...</div>
             <div className="flex gap-2 mt-1">
@@ -322,15 +352,23 @@ export default function App() {
         {/* Signals */}
         <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
           <div className="px-4 py-2 border-b border-slate-800 flex items-center gap-2">
-            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+            <div className={`w-2 h-2 rounded-full ${paused ? 'bg-yellow-500' : 'bg-green-500'} animate-pulse`} />
             <span className="text-[11px] font-semibold">INTELLIGENCE FEED</span>
             <span className="text-[9px] text-slate-600 bg-slate-800 px-2 py-0.5 rounded">{signals.length} signals</span>
+            {hasExpanded && (
+              <button 
+                onClick={() => { setExpanded(new Set()); setPaused(false) }}
+                className="ml-auto text-[9px] text-slate-500 hover:text-slate-300"
+              >
+                Collapse all
+              </button>
+            )}
           </div>
           <div className="divide-y divide-slate-800/50 max-h-[450px] overflow-y-auto">
             {signals.length === 0 ? (
               <div className="p-4 text-xs text-slate-600">Analyzing market data...</div>
             ) : signals.map(s => (
-              <div key={s.id} className="p-3 hover:bg-slate-800/30 cursor-pointer transition-all" onClick={() => setExpanded(expanded === s.id ? null : s.id)}>
+              <div key={s.id} className={`p-3 cursor-pointer transition-all ${expanded.has(s.id) ? 'bg-slate-800/50' : 'hover:bg-slate-800/30'}`} onClick={() => handleExpand(s.id)}>
                 <div className="flex items-start gap-3">
                   <span className="text-lg mt-0.5">{s.icon}</span>
                   <div className="flex-1 min-w-0">
@@ -339,12 +377,12 @@ export default function App() {
                       <span className="text-[11px] text-slate-200 font-medium">{s.title}</span>
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">{s.sub}</div>
-                    {expanded === s.id && s.detail && (
-                      <div className="mt-2 p-3 bg-slate-800/50 rounded text-[10px] text-slate-300 leading-relaxed border-l-2 border-cyan-500/50">
+                    {expanded.has(s.id) && s.detail && (
+                      <div className="mt-2 p-3 bg-slate-800/70 rounded text-[10px] text-slate-300 leading-relaxed border-l-2 border-cyan-500/50">
                         {s.detail}
                       </div>
                     )}
-                    {expanded !== s.id && (
+                    {!expanded.has(s.id) && (
                       <div className="text-[9px] text-cyan-500/70 mt-1">tap for analysis →</div>
                     )}
                   </div>
@@ -412,8 +450,8 @@ export default function App() {
       </div>
 
       <footer className="border-t border-slate-800 px-4 py-2 text-[9px] text-slate-600 flex justify-between">
-        <span>ELCARO OS v1.2</span>
-        <span>Live Data • 5s refresh</span>
+        <span>ELCARO OS v1.3</span>
+        <span>{paused ? '⏸ Paused' : 'Live'} • 5s refresh</span>
       </footer>
     </div>
   )

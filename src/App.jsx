@@ -587,7 +587,7 @@ export default function App() {
             <div>
               <div className={`text-[9px] ${th.textMuted} mb-2`}>{t.theme.toUpperCase()}</div>
               <div className="flex gap-2">
-                {(['dark', 'darker', 'light'] as const).map(thm => (
+                {['dark', 'darker', 'light'].map(thm => (
                   <button key={thm} onClick={() => setTheme(thm)} className={`px-3 py-1 rounded text-[10px] border ${theme === thm ? 'border-cyan-500 text-cyan-400' : `${th.border} ${th.textMuted}`}`}>
                     {t[thm]}
                   </button>
